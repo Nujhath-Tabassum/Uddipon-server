@@ -1,4 +1,3 @@
-
 import express from "express";
 import "dotenv/config";
 import { MongoClient } from "mongodb";
@@ -13,7 +12,6 @@ const client = new MongoClient(process.env.MONGODB_URI);
 let db;
 
 app.use(cors());
-
 app.use(express.json());
 
 async function connectToMongoDB() {
@@ -92,6 +90,26 @@ app.post("/api/events", async (req, res) => {
 
     res.status(500).send({
       message: "Failed to create event."
+    });
+  }
+});
+
+app.get("/api/events", async (req, res) => {
+  try {
+    const today = new Date().toISOString().split("T")[0];
+
+    const events = await db.collection("events")
+      .find({ eventDate: { $gt: today } })
+      .sort({ eventDate: 1 })
+      .toArray();
+
+    res.status(200).send(events);
+
+  } catch (err) {
+    console.error("Error fetching events:", err);
+
+    res.status(500).send({
+      message: "Failed to fetch events."
     });
   }
 });
