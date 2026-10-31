@@ -225,6 +225,38 @@ app.patch("/api/events/:id", async (req, res) => {
   }
 });
 
+app.delete("/api/events/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).send({
+        message: "Invalid event ID."
+      });
+    }
+
+    const result = await db.collection("events").deleteOne({
+      _id: new ObjectId(id)
+    });
+
+    if (result.deletedCount === 0) {
+      return res.status(404).send({
+        message: "Event not found."
+      });
+    }
+
+    res.status(200).send({
+      message: "Event deleted successfully!"
+    });
+
+  } catch (err) {
+    console.error("Event deletion error:", err);
+
+    res.status(500).send({
+      message: "Failed to delete event."
+    });
+  }
+});
 
   app.listen(PORT, () => {
     console.log(`Server is running at http://localhost:${PORT}`);
