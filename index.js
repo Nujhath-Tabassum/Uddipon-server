@@ -1,3 +1,4 @@
+
 import express from "express";
 import "dotenv/config";
 import { MongoClient, ObjectId } from "mongodb";
@@ -11,8 +12,51 @@ const client = new MongoClient(process.env.MONGODB_URI);
 
 let db;
 
-app.use(cors());
+app.use(cors({
+  origin: process.env.CLIENT_URL || "http://localhost:3001",
+  credentials: true
+}));
+
 app.use(express.json());
+
+const verifyUser = async (req, res, next) => {
+  try {
+    const cookie = req.headers.cookie;
+
+    if (!cookie) {
+      return res.status(401).send({
+        message: "Please login first."
+      });
+    }
+
+    const response = await fetch(
+      `${process.env.BETTER_AUTH_URL}/api/auth/get-session`,
+      {
+        headers: {
+          cookie
+        }
+      }
+    );
+
+    const data = await response.json();
+
+    if (!response.ok || !data?.user?.id) {
+      return res.status(401).send({
+        message: "Unauthorized. Please login first."
+      });
+    }
+
+    req.user = data.user;
+
+    next();
+  } catch (error) {
+    console.error("Authentication error:", error);
+
+    res.status(500).send({
+      message: "Authentication verification failed."
+    });
+  }
+};
 
 async function connectToMongoDB() {
   try {
@@ -28,10 +72,30 @@ async function connectToMongoDB() {
 }
 
 app.get("/", (req, res) => {
-  res.send({ message: "Server is running fine!" });
+  res.send({
+    message: "Server is running fine!"
+  });
 });
 
-app.post("/api/events", async (req, res) => {
+app.get("/api/events/recent", async (req, res) => {
+  try {
+    const today = new Date().toISOString().split("T")[0];
+
+    const events = await db.collection("events")
+      .find({ eventDate: { $gte: today } })
+      .sort({ eventDate: 1 })
+      .limit(6)
+      .toArray();
+
+    res.status(200).send(events);
+  } catch (error) {
+    res.status(500).send({
+      message: "Failed to fetch recent events."
+    });
+  }
+});
+
+app.post("/api/events", verifyUser, async (req, res) => {
   try {
     const {
       title,
@@ -75,6 +139,7 @@ app.post("/api/events", async (req, res) => {
       imageUrl: imageUrl.trim(),
       location: location.trim(),
       eventDate,
+      createdBy: req.user.id,
       createdAt: new Date()
     };
 
@@ -84,7 +149,6 @@ app.post("/api/events", async (req, res) => {
       message: "Event created successfully!",
       insertedId: result.insertedId
     });
-
   } catch (err) {
     console.error("Event creation error:", err);
 
@@ -104,7 +168,6 @@ app.get("/api/events", async (req, res) => {
       .toArray();
 
     res.status(200).send(events);
-
   } catch (err) {
     console.error("Error fetching events:", err);
 
@@ -114,8 +177,23 @@ app.get("/api/events", async (req, res) => {
   }
 });
 
-async function startServer() {
-  await connectToMongoDB();
+app.get("/api/my-events", verifyUser, async (req, res) => {
+  try {
+    const events = await db.collection("events")
+      .find({ createdBy: req.user.id })
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    res.status(200).send(events);
+  } catch (err) {
+    console.error("Error fetching your events:", err);
+
+    res.status(500).send({
+      message: "Failed to fetch your events."
+    });
+  }
+});
+
 app.get("/api/events/:id", async (req, res) => {
   try {
     const { id } = req.params;
@@ -137,7 +215,6 @@ app.get("/api/events/:id", async (req, res) => {
     }
 
     res.status(200).send(event);
-
   } catch (err) {
     console.error("Error fetching event:", err);
 
@@ -147,7 +224,7 @@ app.get("/api/events/:id", async (req, res) => {
   }
 });
 
-app.patch("/api/events/:id", async (req, res) => {
+app.patch("/api/events/:id", verifyUser, async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -193,7 +270,10 @@ app.patch("/api/events/:id", async (req, res) => {
     }
 
     const result = await db.collection("events").updateOne(
-      { _id: new ObjectId(id) },
+      {
+        _id: new ObjectId(id),
+        createdBy: req.user.id
+      },
       {
         $set: {
           title: title.trim(),
@@ -208,14 +288,13 @@ app.patch("/api/events/:id", async (req, res) => {
 
     if (result.matchedCount === 0) {
       return res.status(404).send({
-        message: "Event not found."
+        message: "Event not found or you are not authorized to update it."
       });
     }
 
     res.status(200).send({
       message: "Event updated successfully!"
     });
-
   } catch (err) {
     console.error("Event update error:", err);
 
@@ -225,7 +304,7 @@ app.patch("/api/events/:id", async (req, res) => {
   }
 });
 
-app.delete("/api/events/:id", async (req, res) => {
+app.delete("/api/events/:id", verifyUser, async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -236,19 +315,19 @@ app.delete("/api/events/:id", async (req, res) => {
     }
 
     const result = await db.collection("events").deleteOne({
-      _id: new ObjectId(id)
+      _id: new ObjectId(id),
+      createdBy: req.user.id
     });
 
     if (result.deletedCount === 0) {
       return res.status(404).send({
-        message: "Event not found."
+        message: "Event not found or you are not authorized to delete it."
       });
     }
 
     res.status(200).send({
       message: "Event deleted successfully!"
     });
-
   } catch (err) {
     console.error("Event deletion error:", err);
 
@@ -258,12 +337,13 @@ app.delete("/api/events/:id", async (req, res) => {
   }
 });
 
+async function startServer() {
+  await connectToMongoDB();
+
   app.listen(PORT, () => {
     console.log(`Server is running at http://localhost:${PORT}`);
   });
 }
 
 startServer();
-
-
 
