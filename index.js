@@ -1,4 +1,3 @@
-
 import express from "express";
 import "dotenv/config";
 import { MongoClient, ObjectId } from "mongodb";
@@ -19,6 +18,12 @@ app.use(cors({
 
 app.use(express.json());
 
+const getTodayDate = () => {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Dhaka"
+  }).format(new Date());
+};
+
 const verifyUser = async (req, res, next) => {
   try {
     const cookie = req.headers.cookie;
@@ -38,9 +43,15 @@ const verifyUser = async (req, res, next) => {
       }
     );
 
+    if (!response.ok) {
+      return res.status(401).send({
+        message: "Unauthorized. Please login first."
+      });
+    }
+
     const data = await response.json();
 
-    if (!response.ok || !data?.user?.id) {
+    if (!data?.user?.id || !data?.user?.email) {
       return res.status(401).send({
         message: "Unauthorized. Please login first."
       });
@@ -56,6 +67,15 @@ const verifyUser = async (req, res, next) => {
       message: "Authentication verification failed."
     });
   }
+};
+
+const getOwnerQuery = (user) => {
+  return {
+    $or: [
+      { createdBy: user.email },
+      { createdBy: user.id }
+    ]
+  };
 };
 
 async function connectToMongoDB() {
@@ -79,16 +99,20 @@ app.get("/", (req, res) => {
 
 app.get("/api/events/recent", async (req, res) => {
   try {
-    const today = new Date().toISOString().split("T")[0];
+    const today = getTodayDate();
 
     const events = await db.collection("events")
-      .find({ eventDate: { $gte: today } })
+      .find({
+        eventDate: { $gte: today }
+      })
       .sort({ eventDate: 1 })
       .limit(6)
       .toArray();
 
     res.status(200).send(events);
   } catch (error) {
+    console.error("Recent events error:", error);
+
     res.status(500).send({
       message: "Failed to fetch recent events."
     });
@@ -120,12 +144,12 @@ app.post("/api/events", verifyUser, async (req, res) => {
     }
 
     const selectedDate = new Date(`${eventDate}T00:00:00`);
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
 
     if (
+      !/^\d{4}-\d{2}-\d{2}$/.test(eventDate) ||
       Number.isNaN(selectedDate.getTime()) ||
-      selectedDate <= today
+      selectedDate.toISOString().slice(0, 10) !== eventDate ||
+      eventDate <= getTodayDate()
     ) {
       return res.status(400).send({
         message: "Please select a future date."
@@ -139,7 +163,8 @@ app.post("/api/events", verifyUser, async (req, res) => {
       imageUrl: imageUrl.trim(),
       location: location.trim(),
       eventDate,
-      createdBy: req.user.id,
+      createdBy: req.user.email,
+      createdById: req.user.id,
       createdAt: new Date()
     };
 
@@ -160,10 +185,12 @@ app.post("/api/events", verifyUser, async (req, res) => {
 
 app.get("/api/events", async (req, res) => {
   try {
-    const today = new Date().toISOString().split("T")[0];
+    const today = getTodayDate();
 
     const events = await db.collection("events")
-      .find({ eventDate: { $gt: today } })
+      .find({
+        eventDate: { $gte: today }
+      })
       .sort({ eventDate: 1 })
       .toArray();
 
@@ -179,17 +206,44 @@ app.get("/api/events", async (req, res) => {
 
 app.get("/api/my-events", verifyUser, async (req, res) => {
   try {
+    const joinedRecords = await db.collection("joinedEvents")
+      .find({
+        userEmail: req.user.email
+      })
+      .toArray();
+
+    const eventIds = joinedRecords.map((record) => record.eventId);
+
     const events = await db.collection("events")
-      .find({ createdBy: req.user.id })
+      .find({
+        _id: { $in: eventIds }
+      })
+      .sort({ eventDate: 1 })
+      .toArray();
+
+    res.status(200).send(events);
+  } catch (err) {
+    console.error("Error fetching joined events:", err);
+
+    res.status(500).send({
+      message: "Failed to fetch joined events."
+    });
+  }
+});
+
+app.get("/api/manage-events", verifyUser, async (req, res) => {
+  try {
+    const events = await db.collection("events")
+      .find(getOwnerQuery(req.user))
       .sort({ createdAt: -1 })
       .toArray();
 
     res.status(200).send(events);
   } catch (err) {
-    console.error("Error fetching your events:", err);
+    console.error("Error fetching managed events:", err);
 
     res.status(500).send({
-      message: "Failed to fetch your events."
+      message: "Failed to fetch your created events."
     });
   }
 });
@@ -220,6 +274,90 @@ app.get("/api/events/:id", async (req, res) => {
 
     res.status(500).send({
       message: "Failed to fetch event."
+    });
+  }
+});
+
+app.post("/api/events/:id/join", verifyUser, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).send({
+        message: "Invalid event ID."
+      });
+    }
+
+    const event = await db.collection("events").findOne({
+      _id: new ObjectId(id),
+      eventDate: { $gte: getTodayDate() }
+    });
+
+    if (!event) {
+      return res.status(404).send({
+        message: "Upcoming event not found."
+      });
+    }
+
+    const existingJoin = await db.collection("joinedEvents").findOne({
+      eventId: new ObjectId(id),
+      userEmail: req.user.email
+    });
+
+    if (existingJoin) {
+      return res.status(409).send({
+        message: "You have already joined this event."
+      });
+    }
+
+    await db.collection("joinedEvents").insertOne({
+      eventId: new ObjectId(id),
+      userId: req.user.id,
+      userEmail: req.user.email,
+      joinedAt: new Date()
+    });
+
+    res.status(201).send({
+      message: "You have successfully joined the event!"
+    });
+  } catch (err) {
+    console.error("Event joining error:", err);
+
+    res.status(500).send({
+      message: "Failed to join event."
+    });
+  }
+});
+
+app.delete("/api/events/:id/join", verifyUser, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).send({
+        message: "Invalid event ID."
+      });
+    }
+
+    const result = await db.collection("joinedEvents").deleteOne({
+      eventId: new ObjectId(id),
+      userEmail: req.user.email
+    });
+
+    if (result.deletedCount === 0) {
+      return res.status(404).send({
+        message: "You have not joined this event."
+      });
+    }
+
+    res.status(200).send({
+      message: "You have left the event successfully."
+    });
+  } catch (err) {
+    console.error("Event leaving error:", err);
+
+    res.status(500).send({
+      message: "Failed to leave event."
     });
   }
 });
@@ -257,12 +395,12 @@ app.patch("/api/events/:id", verifyUser, async (req, res) => {
     }
 
     const selectedDate = new Date(`${eventDate}T00:00:00`);
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
 
     if (
+      !/^\d{4}-\d{2}-\d{2}$/.test(eventDate) ||
       Number.isNaN(selectedDate.getTime()) ||
-      selectedDate <= today
+      selectedDate.toISOString().slice(0, 10) !== eventDate ||
+      eventDate <= getTodayDate()
     ) {
       return res.status(400).send({
         message: "Please select a future date."
@@ -272,7 +410,7 @@ app.patch("/api/events/:id", verifyUser, async (req, res) => {
     const result = await db.collection("events").updateOne(
       {
         _id: new ObjectId(id),
-        createdBy: req.user.id
+        ...getOwnerQuery(req.user)
       },
       {
         $set: {
@@ -316,7 +454,7 @@ app.delete("/api/events/:id", verifyUser, async (req, res) => {
 
     const result = await db.collection("events").deleteOne({
       _id: new ObjectId(id),
-      createdBy: req.user.id
+      ...getOwnerQuery(req.user)
     });
 
     if (result.deletedCount === 0) {
@@ -324,6 +462,10 @@ app.delete("/api/events/:id", verifyUser, async (req, res) => {
         message: "Event not found or you are not authorized to delete it."
       });
     }
+
+    await db.collection("joinedEvents").deleteMany({
+      eventId: new ObjectId(id)
+    });
 
     res.status(200).send({
       message: "Event deleted successfully!"
@@ -346,4 +488,3 @@ async function startServer() {
 }
 
 startServer();
-
