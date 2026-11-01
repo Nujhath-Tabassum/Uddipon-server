@@ -1,5 +1,6 @@
 import express from "express";
 import "dotenv/config";
+import { createRemoteJWKSet, jwtVerify } from "jose";
 import { MongoClient, ObjectId } from "mongodb";
 import cors from "cors";
 
@@ -24,47 +25,72 @@ const getTodayDate = () => {
   }).format(new Date());
 };
 
+const isValidFutureDate = (date) => {
+  if (typeof date !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    return false;
+  }
+
+  const selectedDate = new Date(`${date}T00:00:00.000Z`);
+
+  return (
+    !Number.isNaN(selectedDate.getTime()) &&
+    selectedDate.toISOString().slice(0, 10) === date &&
+    date > getTodayDate()
+  );
+};
+
 const verifyUser = async (req, res, next) => {
   try {
-    const cookie = req.headers.cookie;
+    const authUrl = process.env.BETTER_AUTH_URL?.replace(/\/$/, "");
 
-    if (!cookie) {
-      return res.status(401).send({
-        message: "Please login first."
-      });
-    }
+    const authHeader = req.headers.authorization;
 
-    const response = await fetch(
-      `${process.env.BETTER_AUTH_URL}/api/auth/get-session`,
-      {
-        headers: {
-          cookie
-        }
-      }
+    console.log(
+      "Authorization header:",
+      authHeader?.startsWith("Bearer ") ? "Token received" : "Token missing"
     );
 
-    if (!response.ok) {
+    if (!authUrl) {
+      return res.status(500).send({
+        message: "Authentication configuration is missing."
+      });
+    }
+
+    if (!authHeader || !authHeader.startsWith("Bearer ")) {
       return res.status(401).send({
         message: "Unauthorized. Please login first."
       });
     }
 
-    const data = await response.json();
+    const token = authHeader.split(" ")[1];
 
-    if (!data?.user?.id || !data?.user?.email) {
+    const JWKS = createRemoteJWKSet(
+      new URL(`${authUrl}/api/auth/jwks`)
+    );
+
+    const { payload } = await jwtVerify(token, JWKS, {
+      issuer: authUrl,
+      audience: authUrl
+    });
+
+    if (!payload.sub || !payload.email) {
       return res.status(401).send({
-        message: "Unauthorized. Please login first."
+        message: "Invalid authentication token."
       });
     }
 
-    req.user = data.user;
+    req.user = {
+      id: payload.sub,
+      email: payload.email
+    };
 
     next();
-  } catch (error) {
-    console.error("Authentication error:", error);
 
-    res.status(500).send({
-      message: "Authentication verification failed."
+  } catch (error) {
+    console.error("JWT verification error:", error);
+
+    return res.status(401).send({
+      message: "Invalid or expired token. Please login again."
     });
   }
 };
@@ -143,14 +169,7 @@ app.post("/api/events", verifyUser, async (req, res) => {
       });
     }
 
-    const selectedDate = new Date(`${eventDate}T00:00:00`);
-
-    if (
-      !/^\d{4}-\d{2}-\d{2}$/.test(eventDate) ||
-      Number.isNaN(selectedDate.getTime()) ||
-      selectedDate.toISOString().slice(0, 10) !== eventDate ||
-      eventDate <= getTodayDate()
-    ) {
+    if (!isValidFutureDate(eventDate)) {
       return res.status(400).send({
         message: "Please select a future date."
       });
@@ -394,14 +413,7 @@ app.patch("/api/events/:id", verifyUser, async (req, res) => {
       });
     }
 
-    const selectedDate = new Date(`${eventDate}T00:00:00`);
-
-    if (
-      !/^\d{4}-\d{2}-\d{2}$/.test(eventDate) ||
-      Number.isNaN(selectedDate.getTime()) ||
-      selectedDate.toISOString().slice(0, 10) !== eventDate ||
-      eventDate <= getTodayDate()
-    ) {
+    if (!isValidFutureDate(eventDate)) {
       return res.status(400).send({
         message: "Please select a future date."
       });
