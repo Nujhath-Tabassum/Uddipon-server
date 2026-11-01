@@ -8,16 +8,45 @@ const app = express();
 
 const PORT = process.env.PORT || 8000;
 
-const client = new MongoClient(process.env.MONGODB_URI);
+if (!process.env.MONGODB_URI) {
+  throw new Error("MONGODB_URI is missing.");
+}
+
+const client = new MongoClient(process.env.MONGODB_URI, {
+  serverSelectionTimeoutMS: 15000
+});
 
 let db;
+let dbPromise;
 
 app.use(cors({
-  origin: process.env.CLIENT_URL || "http://localhost:3001",
+  origin: process.env.CLIENT_URL || "http://localhost:3000",
   credentials: true
 }));
 
 app.use(express.json());
+
+async function connectToMongoDB() {
+  if (db) {
+    return db;
+  }
+
+  if (!dbPromise) {
+    dbPromise = client.connect()
+      .then(() => {
+        db = client.db("uddipon");
+        console.log("Successfully connected to MongoDB!");
+        return db;
+      })
+      .catch((error) => {
+        dbPromise = null;
+        console.error("MongoDB connection failed:", error);
+        throw error;
+      });
+  }
+
+  return dbPromise;
+}
 
 const getTodayDate = () => {
   return new Intl.DateTimeFormat("en-CA", {
@@ -104,23 +133,23 @@ const getOwnerQuery = (user) => {
   };
 };
 
-async function connectToMongoDB() {
-  try {
-    await client.connect();
-
-    db = client.db("uddipon");
-
-    console.log("You successfully connected to MongoDB!");
-  } catch (err) {
-    console.error("MongoDB connection failed:", err);
-    process.exit(1);
-  }
-}
-
 app.get("/", (req, res) => {
   res.send({
     message: "Server is running fine!"
   });
+});
+
+app.use("/api", async (req, res, next) => {
+  try {
+    await connectToMongoDB();
+    next();
+  } catch (error) {
+    console.error("Database unavailable:", error);
+
+    res.status(503).send({
+      message: "Database connection unavailable. Please try again later."
+    });
+  }
 });
 
 app.get("/api/events/recent", async (req, res) => {
@@ -491,12 +520,16 @@ app.delete("/api/events/:id", verifyUser, async (req, res) => {
   }
 });
 
-async function startServer() {
-  await connectToMongoDB();
-
-  app.listen(PORT, () => {
-    console.log(`Server is running at http://localhost:${PORT}`);
-  });
+if (!process.env.VERCEL) {
+  connectToMongoDB()
+    .then(() => {
+      app.listen(PORT, () => {
+        console.log(`Server is running at http://localhost:${PORT}`);
+      });
+    })
+    .catch((error) => {
+      console.error("Server startup failed:", error);
+    });
 }
 
-startServer();
+export default app;
